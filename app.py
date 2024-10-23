@@ -1,56 +1,108 @@
-import openai
+import os
 import requests
-from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
+from flask import Flask, request, jsonify
+import openai
 
-# Initialize Flask app
 app = Flask(__name__)
 
-# Azure OpenAI API credentials
+# Set up Azure OpenAI API credentials
 openai.api_type = "azure"
-openai.api_version = "2023-03-15-preview"
-openai.api_base = "https://vinilhackproject.openai.azure.com/nexi"  # Replace with your Azure OpenAI API endpoint
-openai.api_key = "10e4b0dd49924450b87d56aab5e4fc58"  # Replace with your Azure OpenAI API key
+openai.api_version = "2023-03-15-preview"  # Replace with the correct version
+openai.api_base = "https://vinilhackproject.openai.azure.com/"  # Replace with your endpoint
+openai.api_key = "10e4b0dd49924450b87d56aab5e4fc58"  # Replace with your API key
 
-# Function to fetch data from the SC24 website
-def scrape_sc24_website():
-    url = 'https://sc24.supercomputing.org/'
+# Function to scrape SC24 program data
+def scrape_sc24_programs():
+    url = 'https://sc24.supercomputing.org/program/'
     response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    # Example: Extract all text from the page (you can customize based on the structure of the page)
-    page_text = soup.get_text(separator='\n', strip=True)
-    
-    return page_text
+    programs = []
 
-# Function to query Azure OpenAI GPT-4 model
-def ask_openai(question, context):
-    response = openai.Completion.create(
-        engine="gpt-4",  # Specify the GPT-4 engine
-        prompt=f"Context: {context}\n\nQuestion: {question}",
-        max_tokens=200,
-        n=1,
-        stop=None,
-        temperature=0.7,
-    )
-    answer = response['choices'][0]['text'].strip()
-    return answer
+    if response.status_code == 200:
+        soup = BeautifulSoup(response.content, 'html.parser')
+        # Find relevant data; this part depends on the actual HTML structure of the page
+        for program in soup.find_all('div', class_='program-details'):
+            title = program.find('h3').get_text(strip=True)
+            description = program.find('p').get_text(strip=True)
+            programs.append({"title": title, "description": description})
+    return programs
 
-# Flask route for handling chatbot interaction
+# Chatbot route to handle user requests
 @app.route('/chat', methods=['POST'])
 def chat():
-    data = request.json
-    user_question = data.get('question', '')
+    user_input = request.json.get('message')
+    if not user_input:
+        return jsonify({'response': 'Please provide a message.'}), 400
 
-    # Fetch SC24 data (this can be optimized by caching)
-    context_data = scrape_sc24_website()
+    # Get SC24 program data
+    programs = scrape_sc24_programs()
+    program_details = "\n".join([f"{program['title']}: {program['description']}" for program in programs])
 
-    # Send the question along with website context to GPT-4
-    gpt_answer = ask_openai(user_question, context_data)
+    # Create the prompt for OpenAI API
+    prompt = f"User: {user_input}\n\nHere are some SC24 programs:\n{program_details}\n\nBot:"
 
-    return jsonify({'answer': gpt_answer})
+    # Use Azure OpenAI API to generate a chatbot response
+    try:
+        response = openai.ChatCompletion.create(
+            engine="gpt-4",  # Change if needed
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150,
+            temperature=0.7
+        )
+        bot_response = response.choices[0].message['content'].strip()
+        return jsonify({'response': bot_response})
+    except Exception as e:
+        return jsonify({'response': f"Error: {str(e)}"}), 500
 
-# Main function to run the app
+# Serve the HTML page for the chatbot interface
+@app.route('/')
+def index():
+    return '''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Chatbot</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            #chatbox { border: 1px solid #ccc; width: 50%; height: 400px; padding: 10px; overflow-y: scroll; background-color: #f9f9f9; }
+            .message { margin: 10px 0; }
+            .message.user { text-align: right; color: blue; }
+            .message.bot { text-align: left; color: green; }
+        </style>
+    </head>
+    <body>
+        <h2>Chat with our bot</h2>
+        <div id="chatbox"></div>
+        <input type="text" id="userInput" placeholder="Type your message here..." style="width: 50%; padding: 10px;">
+        <button onclick="sendMessage()">Send</button>
+        <script>
+            function sendMessage() {
+                let userInput = document.getElementById('userInput').value;
+                if (userInput.trim() === '') return;
+                let chatbox = document.getElementById('chatbox');
+                chatbox.innerHTML += `<div class="message user">${userInput}</div>`;
+                chatbox.scrollTop = chatbox.scrollHeight;
+                document.getElementById('userInput').value = '';
+                fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: userInput })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    chatbox.innerHTML += `<div class="message bot">${data.response}</div>`;
+                    chatbox.scrollTop = chatbox.scrollHeight;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                });
+            }
+        </script>
+    </body>
+    </html>
+    '''
+
 if __name__ == '__main__':
-    # Run Flask app (this can be integrated into your httpd webserver using WSGI)
-    app.run(host='0.0.0.0', port=5000)
+    app.run(debug=True)
